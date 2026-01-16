@@ -31,20 +31,10 @@ jobs:
         ndk-version: r21e
         add-to-path: true
         
-    - name: Setup Gradle
-      uses: gradle/gradle-build-action@v2
-      with:
-        gradle-version: '7.5'
-        
-    - name: Grant Execute Permission for Gradlew
-      run: |
-        cd Main
-        chmod +x gradlew || echo "gradlew not found, will use gradle wrapper"
-        
     - name: Build Debug APK with Gradle
       run: |
         cd Main
-        ./gradlew assembleDebug --stacktrace
+        ./gradlew assembleDebug --stacktrace --no-daemon
         
     - name: Prepare Magisk Module Structure
       run: |
