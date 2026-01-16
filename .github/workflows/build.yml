@@ -4,8 +4,7 @@ on:
   push:
     branches: [ master, main ]
     paths:
-      - 'Main/DSPManager/**'
-      - 'Main/libjamesdsp/**'
+      - 'Main/**'
       - 'magisk_module/**'
       - '.github/workflows/build.yml'
   pull_request:
@@ -32,55 +31,20 @@ jobs:
         ndk-version: r21e
         add-to-path: true
         
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-      
-    - name: Install SDK Platform & Build Tools
-      run: |
-        sdkmanager "platforms;android-29"
-        sdkmanager "build-tools;29.0.3"
+    - name: Setup Gradle
+      uses: gradle/gradle-build-action@v2
+      with:
+        gradle-version: '7.5'
         
-    - name: Build Native Libraries
+    - name: Grant Execute Permission for Gradlew
       run: |
-        cd Main/DSPManager
-        ndk-build clean
-        ndk-build -j$(nproc)
+        cd Main
+        chmod +x gradlew || echo "gradlew not found, will use gradle wrapper"
         
-    - name: Create local.properties
+    - name: Build Debug APK with Gradle
       run: |
-        cd Main/DSPManager
-        echo "sdk.dir=$ANDROID_HOME" > local.properties
-        echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-        
-    - name: Create build configuration
-      run: |
-        cd Main/DSPManager
-        
-        # Create build.xml manually since 'android' tool is deprecated
-        cat > build.xml << 'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <project name="JamesDSPManagerRE" default="help">
-            <property file="local.properties" />
-            <property file="ant.properties" />
-            <property environment="env" />
-            <condition property="sdk.dir" value="${env.ANDROID_HOME}">
-                <isset property="env.ANDROID_HOME" />
-            </condition>
-            <loadproperties srcFile="project.properties" />
-            <fail
-                message="sdk.dir is missing. Make sure to generate local.properties using 'android update project' or to inject it through the ANDROID_HOME environment variable."
-                unless="sdk.dir"
-            />
-            <import file="custom_rules.xml" optional="true" />
-            <import file="${sdk.dir}/tools/ant/build.xml" />
-        </project>
-        EOF
-        
-    - name: Build APK with Ant
-      run: |
-        cd Main/DSPManager
-        ant clean
-        ant debug
+        cd Main
+        ./gradlew assembleDebug --stacktrace
         
     - name: Prepare Magisk Module Structure
       run: |
@@ -89,11 +53,11 @@ jobs:
         mkdir -p magisk_release/system/lib64/soundfx
         
         # Copy APK
-        cp Main/DSPManager/bin/*-debug.apk magisk_release/system/priv-app/JamesDSPManagerRE/JamesDSPManagerRE.apk
+        cp Main/DSPManager/build/outputs/apk/debug/*.apk magisk_release/system/priv-app/JamesDSPManagerRE/JamesDSPManagerRE.apk
         
         # Copy native libraries
-        cp Main/DSPManager/libs/armeabi-v7a/libjamesdsp.so magisk_release/system/lib/soundfx/ 2>/dev/null || true
-        cp Main/DSPManager/libs/arm64-v8a/libjamesdsp.so magisk_release/system/lib64/soundfx/ 2>/dev/null || true
+        find Main/DSPManager/build/intermediates/ndkBuild -name "libjamesdsp.so" -exec cp {} magisk_release/system/lib/soundfx/ \; 2>/dev/null || true
+        find Main/DSPManager/build/intermediates/ndkBuild -name "libjamesdsp.so" -path "*/arm64-v8a/*" -exec cp {} magisk_release/system/lib64/soundfx/ \; 2>/dev/null || true
         
         # Copy module files
         cp -r magisk_module/* magisk_release/
@@ -116,27 +80,41 @@ jobs:
         name: JamesDSPManager-RE-Magisk-Module
         path: JamesDSPManager-RE-v10.0-RE.zip
         
+    - name: Upload Debug APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: JamesDSPManager-RE-Debug-APK
+        path: Main/DSPManager/build/outputs/apk/debug/*.apk
+        
     - name: Create GitHub Release (on tag)
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
-        files: JamesDSPManager-RE-v10.0-RE.zip
+        files: |
+          JamesDSPManager-RE-v10.0-RE.zip
+          Main/DSPManager/build/outputs/apk/debug/*.apk
         body: |
-          ## JamesDSPManager-RE Magisk Module
+          ## JamesDSPManager-RE Release
           
           **Version:** ${{ github.ref_name }}
           **Build Date:** ${{ github.event.head_commit.timestamp }}
           **Maintainer:** Mohammad Adi
           
           ### Installation
-          1. Download the ZIP file
+          
+          **Magisk Module (Recommended):**
+          1. Download `JamesDSPManager-RE-v10.0-RE.zip`
           2. Flash via Magisk Manager
           3. Reboot
-          4. Open JamesDSP Manager RE from launcher
+          
+          **Standalone APK:**
+          1. Download the APK file
+          2. Install manually
+          3. May require manual audio effects configuration
           
           ### Requirements
           - Android 5.0+ (API 21+)
-          - Magisk 20.4+
+          - Magisk 20.4+ (for module installation)
           - ARM/ARM64 architecture
           
           ### Changes
