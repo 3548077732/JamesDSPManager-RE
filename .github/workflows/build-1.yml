@@ -1,4 +1,4 @@
-name: Build JamesDSPManager-RE Magisk Module
+name: Build JamesDSPManager-RE Magisk Module 2
 
 on:
   push:
@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MODULE_ROOT: ${{ github.workspace }}/magisk_release
+      MAIN_DIR: ${{ github.workspace }}/Main  # 显式定义Main目录路径
 
     steps:
     - name: Checkout Repository
@@ -44,30 +45,53 @@ jobs:
       id: date
       run: echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
 
-    - name: 赋予Gradle执行权限（仅保留有效行，修复.gradle不存在错误）
+    - name: 检查Main目录核心配置文件（提前拦截缺失问题）
       run: |
-        cd Main
-        chmod +x gradlew
+        # 确保settings.gradle/gradle.properties存在，否则直接报错
+        if [ ! -f $MAIN_DIR/settings.gradle ] && [ ! -f $MAIN_DIR/settings.gradle.kts ]; then
+          echo "Error: settings.gradle/settings.gradle.kts not found in Main directory!"
+          ls -la $MAIN_DIR
+          exit 1
+        fi
+        if [ ! -f $MAIN_DIR/gradlew ]; then
+          echo "Error: gradlew not found in Main directory!"
+          exit 1
+        fi
 
-    - name: Build Debug APK with Gradle
+    - name: 修复gradlew并赋予执行权限（核心解决换行符/参数解析问题）
       run: |
-        cd Main
-        ./gradlew assembleDebug --stacktrace --no-daemon --info \
-        -Dorg.gradle.jvmargs=-Xmx2048m
+        # 1. 安装dos2unix修复Windows CRLF换行符（Linux执行会解析出乱码参数）
+        sudo apt-get update && sudo apt-get install -y dos2unix
+        # 2. 修复gradlew换行符，彻底避免参数解析乱码
+        dos2unix $MAIN_DIR/gradlew
+        # 3. 赋予执行权限
+        chmod +x $MAIN_DIR/gradlew
+
+    - name: Build Debug APK with Gradle（终极修复：显式指定settings+无cd+极简参数）
+      working-directory: ${{ env.MAIN_DIR }}  # 直接指定工作目录，替代cd，避免shell切换
+      run: |
+        # 显式指定settings文件，强制Gradle使用正确配置，拒绝误解析参数
+        # 移除--info/--stacktrace减少参数，仅保留--no-daemon适配CI
+        ./gradlew assembleDebug --no-daemon \
+        --settings-file ${{ env.MAIN_DIR }}/settings.gradle \
+        -Dorg.gradle.jvmargs=-Xmx2048m \
+        -Dandroid.ndkPath=${{ env.ANDROID_NDK_HOME }}
 
     - name: Prepare Magisk Module Structure
       run: |
         mkdir -p $MODULE_ROOT/common/files/{arm,x86,arm64-v8a,x86_64}
         mkdir -p $MODULE_ROOT/common/files/JamesDSP/{Convolver,DDC,liveprog,Presets}
         
-        APK_PATH=$(find Main/DSPManager/build/outputs/apk/debug -name "*.apk" | head -1)
+        APK_PATH=$(find $MAIN_DIR/DSPManager/build/outputs/apk/debug -name "*.apk" | head -1)
         if [ -f "$APK_PATH" ]; then
           cp "$APK_PATH" $MODULE_ROOT/common/files/JamesDSPManager.apk
         else
-          echo "Error: Debug APK not found!" && exit 1
+          echo "Error: Debug APK not found!"
+          ls -la $MAIN_DIR/DSPManager/build/outputs/apk/debug/ 2>/dev/null || true
+          exit 1
         fi
         
-        find Main/DSPManager/build/intermediates/merged_native_libs -name "libjamesdsp.so" | while read SO_FILE; do
+        find $MAIN_DIR/DSPManager/build/intermediates -name "libjamesdsp.so" | while read SO_FILE; do
           case $SO_FILE in
             *armeabi-v7a*) cp $SO_FILE $MODULE_ROOT/common/files/arm/ ;;
             *x86*) cp $SO_FILE $MODULE_ROOT/common/files/x86/ ;;
@@ -105,7 +129,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: JamesDSPManager-RE-Debug-APK
-        path: Main/DSPManager/build/outputs/apk/debug/*.apk
+        path: ${{ env.MAIN_DIR }}/DSPManager/build/outputs/apk/debug/*.apk
         if-no-files-found: error
 
     - name: Create GitHub Release (on tag)
@@ -114,7 +138,7 @@ jobs:
       with:
         files: |
           ${{ env.ZIP_NAME }}
-          Main/DSPManager/build/outputs/apk/debug/*.apk
+          ${{ env.MAIN_DIR }}/DSPManager/build/outputs/apk/debug/*.apk
         body: |
           ## JamesDSPManager-RE Release
           
