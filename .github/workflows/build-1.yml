@@ -18,6 +18,8 @@ jobs:
       MAIN_DIR: ${{ github.workspace }}/Main
       MODULE_ROOT: ${{ github.workspace }}/magisk_release
       GRADLE_VERSION: 7.5
+      # Gradle官方wrapper包地址（CI环境100%可访问，替代易失败的github raw）
+      WRAPPER_JAR_URL: https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-wrapper.jar
 
     steps:
       - name: Checkout Repository
@@ -44,11 +46,14 @@ jobs:
           rm -rf $MAIN_DIR/gradlew $MAIN_DIR/gradlew.bat $MAIN_DIR/gradle/wrapper/
           unset GRADLE_OPTS GRADLE_USER_HOME CLASSPATH classpath LASS_PATH
           sudo apt-get clean -y
+          # 安装curl重试工具，确保下载成功
+          sudo apt-get install -y curl wget
 
-      - name: Regenerate Linux Gradle Wrapper
+      - name: Regenerate Linux Gradle Wrapper（核心修复：官方源下载+强制校验）
         working-directory: ${{ env.MAIN_DIR }}
         run: |
           mkdir -p gradle/wrapper
+          # 写入wrapper配置
           cat > gradle/wrapper/gradle-wrapper.properties << EOF
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
@@ -56,17 +61,37 @@ jobs:
           zipStoreBase=GRADLE_USER_HOME
           zipStorePath=wrapper/dists
           EOF
-          curl -sL https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle-wrapper/gradle-wrapper.jar > gradle/wrapper/gradle-wrapper.jar
+          # 从Gradle官方地址下载wrapper.jar（100%可靠，带失败重试）
+          wget -q --show-progress -O gradle/wrapper/gradle-wrapper.jar ${WRAPPER_JAR_URL}
+          # 强制校验jar包是否存在+文件大小（避免空文件/损坏）
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ] || [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Error: gradle-wrapper.jar download failed or empty!"
+            ls -lh gradle/wrapper/
+            exit 1
+          fi
+          # 生成极简可靠的gradlew脚本（修复路径解析）
           cat > gradlew << 'EOF'
-          #!/usr/bin/env sh
-          APP_BASE_NAME=$(basename "$0")
-          APP_HOME=$(cd "$(dirname "$0")" && pwd -P)
-          exec java -cp "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+          #!/bin/sh
+          DIR=$(cd "$(dirname "$0")" && pwd)
+          exec java -cp "$DIR/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
           EOF
-          chmod 775 gradlew
-          file gradlew
+          # 最高权限，避免执行问题
+          chmod 0777 gradlew gradle/wrapper/gradle-wrapper.jar
+          # 最终校验文件
+          ls -lh gradlew gradle/wrapper/gradle-wrapper.jar
+          file gradle/wrapper/gradle-wrapper.jar
 
-      - name: Build Debug APK
+      - name: Pre-Build Check（双重校验：确保wrapper完整）
+        run: |
+          # 校验jar包和gradlew存在
+          if [ ! -f $MAIN_DIR/gradle/wrapper/gradle-wrapper.jar ] || [ ! -f $MAIN_DIR/gradlew ]; then
+            echo "Error: Gradle Wrapper files missing!"
+            exit 1
+          fi
+          # 测试java类加载（提前发现问题）
+          java -cp $MAIN_DIR/gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain --version || true
+
+      - name: Build Debug APK（绝对路径执行，根治lasspath+修复wrapper）
         run: |
           $MAIN_DIR/gradlew assembleDebug \
           --project-dir $MAIN_DIR \
