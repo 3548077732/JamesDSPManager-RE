@@ -14,105 +14,134 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+    env:
+      # 显式指定NDK路径，适配Gradle7.5+JDK17，规避路径解析错误
+      ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      # 模块构建根目录，统一路径引用
+      MODULE_ROOT: ${{ github.workspace }}/magisk_release
+
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      
+      with:
+        fetch-depth: 1  # 浅克隆，提升速度
+
     - name: Setup JDK 17
       uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '17'
-        
-    - name: Setup Android NDK
+        cache: gradle  # 缓存Gradle依赖，避免重复下载
+
+    - name: Setup Android NDK r21e
+      id: setup-ndk
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r21e
         add-to-path: true
-        
-    - name: Build Debug APK with Gradle
+
+    - name: 赋予Gradle执行权限（核心修复：避免执行失败+参数解析错误）
       run: |
         cd Main
-        ./gradlew assembleDebug --stacktrace --no-daemon
-        
+        chmod +x gradlew
+        chmod -R 755 .gradle/  # 修复gradle目录权限
+
+    - name: Build Debug APK with Gradle（移除潜在参数解析问题，加调试日志）
+      run: |
+        cd Main
+        ./gradlew assembleDebug --stacktrace --no-daemon --info \
+        -Dorg.gradle.jvmargs=-Xmx2048m  # 限制内存，适配CI环境
+
     - name: Prepare Magisk Module Structure
       run: |
-        # Create module structure matching original JamesDSP format
-        mkdir -p magisk_release/common/files/arm
-        mkdir -p magisk_release/common/files/x86  
-        mkdir -p magisk_release/common/files/JamesDSP/Convolver
-        mkdir -p magisk_release/common/files/JamesDSP/DDC
-        mkdir -p magisk_release/common/files/JamesDSP/liveprog
-        mkdir -p magisk_release/common/files/JamesDSP/Presets
+        # 初始化模块目录结构
+        mkdir -p $MODULE_ROOT/common/files/{arm,x86,arm64-v8a,x86_64}
+        mkdir -p $MODULE_ROOT/common/files/JamesDSP/{Convolver,DDC,liveprog,Presets}
         
-        # Copy APK
-        cp Main/DSPManager/build/outputs/apk/debug/*.apk magisk_release/common/files/JamesDSPManager.apk
+        # 修正APK拷贝路径（适配JamesDSP项目结构，避免找不到APK）
+        APK_PATH=$(find Main/DSPManager/build/outputs/apk/debug -name "*.apk" | head -1)
+        if [ -f "$APK_PATH" ]; then
+          cp "$APK_PATH" $MODULE_ROOT/common/files/JamesDSPManager.apk
+        else
+          echo "Error: Debug APK not found!" && exit 1
+        fi
         
-        # Copy native libraries to proper arch folders
-        find Main/DSPManager/build/intermediates/ndkBuild -name "libjamesdsp.so" -path "*/armeabi-v7a/*" -exec cp {} magisk_release/common/files/arm/ \; 2>/dev/null || true
-        find Main/DSPManager/build/intermediates/ndkBuild -name "libjamesdsp.so" -path "*/x86/*" -exec cp {} magisk_release/common/files/x86/ \; 2>/dev/null || true
+        # 修正SO库拷贝路径（适配Gradle7.5+NDK r21e，从merged_native_libs读取，兼容多架构）
+        find Main/DSPManager/build/intermediates/merged_native_libs -name "libjamesdsp.so" | while read SO_FILE; do
+          case $SO_FILE in
+            *armeabi-v7a*) cp $SO_FILE $MODULE_ROOT/common/files/arm/ ;;
+            *x86*) cp $SO_FILE $MODULE_ROOT/common/files/x86/ ;;
+            *arm64-v8a*) cp $SO_FILE $MODULE_ROOT/common/files/arm64-v8a/ ;;
+            *x86_64*) cp $SO_FILE $MODULE_ROOT/common/files/x86_64/ ;;
+          esac
+        done
         
-        # Copy module metadata and scripts
-        cp -r magisk_module/* magisk_release/
-        
-        # Set executable permissions
-        chmod 755 magisk_release/customize.sh
-        chmod 755 magisk_release/service.sh
-        chmod 755 magisk_release/META-INF/com/google/android/update-binary
-        
-    - name: Create Magisk Module ZIP
+        # 拷贝模块元数据并设置执行权限
+        cp -r magisk_module/* $MODULE_ROOT/
+        chmod 755 $MODULE_ROOT/{customize.sh,service.sh}
+        chmod 755 $MODULE_ROOT/META-INF/com/google/android/update-binary
+
+    - name: Create Magisk Module ZIP（动态版本号，避免固定值，优化打包）
       run: |
-        cd magisk_release
-        zip -r9 ../JamesDSPManager-RE-v10.0-RE.zip * -x '*.git*'
-        cd ..
-        ls -lh JamesDSPManager-RE-v10.0-RE.zip
-        
+        # 动态获取版本号（标签/分支名），适配tag发布和日常构建
+        VERSION=${{ github.ref_name || 'dev-build-'$(date +%Y%m%d%H%M) }}
+        ZIP_NAME="JamesDSPManager-RE-$VERSION.zip"
+        cd $MODULE_ROOT
+        zip -r9 ${{ github.workspace }}/$ZIP_NAME * -x "*.git*" "*.DS_Store" "*/.git/*"
+        cd ${{ github.workspace }}
+        ls -lh $ZIP_NAME
+        # 导出ZIP名称到环境变量，供后续步骤使用
+        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
     - name: Upload Magisk Module
       uses: actions/upload-artifact@v4
       with:
         name: JamesDSPManager-RE-Magisk-Module
-        path: JamesDSPManager-RE-v10.0-RE.zip
-        
+        path: ${{ env.ZIP_NAME }}
+        if-no-files-found: error  # 无文件则构建失败
+
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
       with:
         name: JamesDSPManager-RE-Debug-APK
         path: Main/DSPManager/build/outputs/apk/debug/*.apk
-        
+        if-no-files-found: error
+
     - name: Create GitHub Release (on tag)
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          JamesDSPManager-RE-v10.0-RE.zip
+          ${{ env.ZIP_NAME }}
           Main/DSPManager/build/outputs/apk/debug/*.apk
         body: |
           ## JamesDSPManager-RE Release
           
           **Version:** ${{ github.ref_name }}
-          **Build Date:** ${{ github.event.head_commit.timestamp }}
+          **Build Date:** ${{ steps.date.outputs.date }}
           **Maintainer:** Mohammad Adi
+          **CI Run ID:** ${{ github.run_id }}
           
           ### Installation
-          
           **Magisk Module (Recommended):**
-          1. Download `JamesDSPManager-RE-v10.0-RE.zip`
-          2. Flash via Magisk Manager
-          3. Reboot
+          1. Download `${{ env.ZIP_NAME }}`
+          2. Flash via Magisk Manager/Kitsune Mask
+          3. Reboot device
           
           **Standalone APK:**
-          1. Download the APK file
-          2. Install manually
-          3. May require manual audio effects configuration
+          1. Download the attached APK file
+          2. Install manually (enable unknown sources)
+          3. Manual audio effects configuration may be required
           
           ### Requirements
           - Android 5.0+ (API 21+)
-          - Magisk 20.4+ (for module installation)
-          - ARM/ARM64 architecture
+          - Magisk 20.4+ / KernelSU 0.6.5+
+          - ARM/ARM64/x86/x86_64 architecture
           
-          ### Changes
-          ${{ github.event.head_commit.message }}
-          
+          ### What's Changed
+          ${{ github.event.head_commit.message || 'No commit message provided' }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Get Build Date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
