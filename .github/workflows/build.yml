@@ -15,23 +15,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 显式指定NDK路径，适配Gradle7.5+JDK17，规避路径解析错误
-      ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      # 模块构建根目录，统一路径引用
+      # 仅定义静态路径，移除steps动态变量（核心修复1）
       MODULE_ROOT: ${{ github.workspace }}/magisk_release
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 1  # 浅克隆，提升速度
+        fetch-depth: 1
 
     - name: Setup JDK 17
       uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '17'
-        cache: gradle  # 缓存Gradle依赖，避免重复下载
+        cache: gradle
 
     - name: Setup Android NDK r21e
       id: setup-ndk
@@ -40,25 +38,30 @@ jobs:
         ndk-version: r21e
         add-to-path: true
 
-    - name: 赋予Gradle执行权限（核心修复：避免执行失败+参数解析错误）
+    - name: 导出NDK路径到环境变量（核心修复1：步骤执行后再赋值）
+      run: echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+
+    - name: Get Build Date（提前执行，避免release步骤变量未定义）
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
+
+    - name: 赋予Gradle执行权限
       run: |
         cd Main
         chmod +x gradlew
-        chmod -R 755 .gradle/  # 修复gradle目录权限
+        chmod -R 755 .gradle/
 
-    - name: Build Debug APK with Gradle（移除潜在参数解析问题，加调试日志）
+    - name: Build Debug APK with Gradle
       run: |
         cd Main
         ./gradlew assembleDebug --stacktrace --no-daemon --info \
-        -Dorg.gradle.jvmargs=-Xmx2048m  # 限制内存，适配CI环境
+        -Dorg.gradle.jvmargs=-Xmx2048m
 
     - name: Prepare Magisk Module Structure
       run: |
-        # 初始化模块目录结构
         mkdir -p $MODULE_ROOT/common/files/{arm,x86,arm64-v8a,x86_64}
         mkdir -p $MODULE_ROOT/common/files/JamesDSP/{Convolver,DDC,liveprog,Presets}
         
-        # 修正APK拷贝路径（适配JamesDSP项目结构，避免找不到APK）
         APK_PATH=$(find Main/DSPManager/build/outputs/apk/debug -name "*.apk" | head -1)
         if [ -f "$APK_PATH" ]; then
           cp "$APK_PATH" $MODULE_ROOT/common/files/JamesDSPManager.apk
@@ -66,7 +69,6 @@ jobs:
           echo "Error: Debug APK not found!" && exit 1
         fi
         
-        # 修正SO库拷贝路径（适配Gradle7.5+NDK r21e，从merged_native_libs读取，兼容多架构）
         find Main/DSPManager/build/intermediates/merged_native_libs -name "libjamesdsp.so" | while read SO_FILE; do
           case $SO_FILE in
             *armeabi-v7a*) cp $SO_FILE $MODULE_ROOT/common/files/arm/ ;;
@@ -76,21 +78,23 @@ jobs:
           esac
         done
         
-        # 拷贝模块元数据并设置执行权限
         cp -r magisk_module/* $MODULE_ROOT/
         chmod 755 $MODULE_ROOT/{customize.sh,service.sh}
         chmod 755 $MODULE_ROOT/META-INF/com/google/android/update-binary
 
-    - name: Create Magisk Module ZIP（动态版本号，避免固定值，优化打包）
+    - name: Create Magisk Module ZIP
       run: |
-        # 动态获取版本号（标签/分支名），适配tag发布和日常构建
-        VERSION=${{ github.ref_name || 'dev-build-'$(date +%Y%m%d%H%M) }}
+        # 核心修复2：用shell语法替代YAML表达式，解决$符号混写错误
+        if [ -n "${{ github.ref_name }}" ]; then
+          VERSION="${{ github.ref_name }}"
+        else
+          VERSION="dev-build-$(date +%Y%m%d%H%M)"
+        fi
         ZIP_NAME="JamesDSPManager-RE-$VERSION.zip"
         cd $MODULE_ROOT
         zip -r9 ${{ github.workspace }}/$ZIP_NAME * -x "*.git*" "*.DS_Store" "*/.git/*"
         cd ${{ github.workspace }}
         ls -lh $ZIP_NAME
-        # 导出ZIP名称到环境变量，供后续步骤使用
         echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
     - name: Upload Magisk Module
@@ -98,7 +102,7 @@ jobs:
       with:
         name: JamesDSPManager-RE-Magisk-Module
         path: ${{ env.ZIP_NAME }}
-        if-no-files-found: error  # 无文件则构建失败
+        if-no-files-found: error
 
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
@@ -142,6 +146,3 @@ jobs:
           ${{ github.event.head_commit.message || 'No commit message provided' }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    - name: Get Build Date
-      id: date
-      run: echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
