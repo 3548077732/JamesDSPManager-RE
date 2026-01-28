@@ -1,4 +1,4 @@
-name: Build JamesDSPManager-RE Magisk Module 2
+name: Build JamesDSPManager-RE Magisk Module
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MODULE_ROOT: ${{ github.workspace }}/magisk_release
-      MAIN_DIR: ${{ github.workspace }}/Main  # 显式定义Main目录路径
+      MAIN_DIR: ${{ github.workspace }}/Main
 
     steps:
     - name: Checkout Repository
@@ -45,11 +45,10 @@ jobs:
       id: date
       run: echo "date=$(date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
 
-    - name: 检查Main目录核心配置文件（提前拦截缺失问题）
+    - name: 检查Main目录核心配置文件
       run: |
-        # 确保settings.gradle/gradle.properties存在，否则直接报错
         if [ ! -f $MAIN_DIR/settings.gradle ] && [ ! -f $MAIN_DIR/settings.gradle.kts ]; then
-          echo "Error: settings.gradle/settings.gradle.kts not found in Main directory!"
+          echo "Error: settings.gradle not found in Main directory!"
           ls -la $MAIN_DIR
           exit 1
         fi
@@ -58,22 +57,16 @@ jobs:
           exit 1
         fi
 
-    - name: 修复gradlew并赋予执行权限（核心解决换行符/参数解析问题）
+    - name: 修复gradlew并赋予执行权限
       run: |
-        # 1. 安装dos2unix修复Windows CRLF换行符（Linux执行会解析出乱码参数）
         sudo apt-get update && sudo apt-get install -y dos2unix
-        # 2. 修复gradlew换行符，彻底避免参数解析乱码
         dos2unix $MAIN_DIR/gradlew
-        # 3. 赋予执行权限
         chmod +x $MAIN_DIR/gradlew
 
-    - name: Build Debug APK with Gradle（终极修复：显式指定settings+无cd+极简参数）
-      working-directory: ${{ env.MAIN_DIR }}  # 直接指定工作目录，替代cd，避免shell切换
+    - name: Build Debug APK with Gradle（移除重复的settings-file参数，核心修复本次报错）
+      working-directory: ${{ env.MAIN_DIR }}
       run: |
-        # 显式指定settings文件，强制Gradle使用正确配置，拒绝误解析参数
-        # 移除--info/--stacktrace减少参数，仅保留--no-daemon适配CI
         ./gradlew assembleDebug --no-daemon \
-        --settings-file ${{ env.MAIN_DIR }}/settings.gradle \
         -Dorg.gradle.jvmargs=-Xmx2048m \
         -Dandroid.ndkPath=${{ env.ANDROID_NDK_HOME }}
 
@@ -87,7 +80,7 @@ jobs:
           cp "$APK_PATH" $MODULE_ROOT/common/files/JamesDSPManager.apk
         else
           echo "Error: Debug APK not found!"
-          ls -la $MAIN_DIR/DSPManager/build/outputs/apk/debug/ 2>/dev/null || true
+          ls -la $MAIN_DIR/DSPManager/build/outputs/apk/ 2>/dev/null || true
           exit 1
         fi
         
@@ -144,24 +137,17 @@ jobs:
           
           **Version:** ${{ github.ref_name }}
           **Build Date:** ${{ steps.date.outputs.date }}
-          **Maintainer:** Mohammad Adi
           **CI Run ID:** ${{ github.run_id }}
           
           ### Installation
-          **Magisk Module (Recommended):**
-          1. Download `${{ env.ZIP_NAME }}`
-          2. Flash via Magisk Manager/Kitsune Mask
-          3. Reboot device
-          
-          **Standalone APK:**
-          1. Download the attached APK file
-          2. Install manually (enable unknown sources)
-          3. Manual audio effects configuration may be required
+          1. Download `${{ env.ZIP_NAME }}` and flash via Magisk/KernelSU
+          2. Reboot device
+          3. Install the attached APK if needed
           
           ### Requirements
           - Android 5.0+ (API 21+)
           - Magisk 20.4+ / KernelSU 0.6.5+
-          - ARM/ARM64/x86/x86_64 architecture
+          - ARM/ARM64/x86/x86_64
           
           ### What's Changed
           ${{ github.event.head_commit.message || 'No commit message provided' }}
