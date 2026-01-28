@@ -15,11 +15,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 全局绝对路径，全程无相对路径/CD切换
       WORKSPACE: ${{ github.workspace }}
       MAIN_DIR: ${{ github.workspace }}/Main
       MODULE_ROOT: ${{ github.workspace }}/magisk_release
-      GRADLE_VERSION: 7.5  # 与项目指定版本一致
+      GRADLE_VERSION: 7.5
 
     steps:
     - name: Checkout Repository
@@ -32,7 +31,7 @@ jobs:
       with:
         distribution: 'zulu'
         java-version: '17'
-        cache: none  # 禁用默认缓存，避免残留错误
+        cache: none
 
     - name: Setup Android NDK r21e
       id: setup-ndk
@@ -41,21 +40,17 @@ jobs:
         ndk-version: r21e
         add-to-path: true
 
-    - name: 清理所有Gradle缓存+环境变量（核心：清除残留错误配置）
+    - name: 清理Gradle缓存+污染文件+干扰环境变量
       run: |
-        # 清理全局/项目gradle缓存
         rm -rf ~/.gradle/ $MAIN_DIR/.gradle/ $MAIN_DIR/gradle/
-        # 清理项目自带的污染gradlew文件
         rm -rf $MAIN_DIR/gradlew $MAIN_DIR/gradlew.bat $MAIN_DIR/gradle/wrapper/
-        # 禁用所有可能干扰的环境变量
         unset GRADLE_OPTS GRADLE_USER_HOME CLASSPATH classpath LASS_PATH
+        sudo apt-get clean
 
-    - name: 重新生成纯Linux格式Gradle Wrapper（彻底替换污染文件）
+    - name: 重新生成Linux原生Gradle Wrapper（无任何隐藏乱码）
       working-directory: ${{ env.MAIN_DIR }}
       run: |
-        # 手动生成gradle wrapper配置
         mkdir -p gradle/wrapper
-        # 写入纯Linux格式wrapper配置，无任何隐藏字符
         cat > gradle/wrapper/gradle-wrapper.properties << EOF
         distributionBase=GRADLE_USER_HOME
         distributionPath=wrapper/dists
@@ -63,7 +58,6 @@ jobs:
         zipStoreBase=GRADLE_USER_HOME
         zipStorePath=wrapper/dists
         EOF
-        # 生成Linux原生gradlew（无CRLF/乱码）
         curl -sL https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle-wrapper/gradle-wrapper.jar > gradle/wrapper/gradle-wrapper.jar
         cat > gradlew << 'EOF'
         #!/usr/bin/env sh
@@ -71,14 +65,11 @@ jobs:
         APP_HOME=$(cd "$(dirname "$0")" && pwd -P)
         exec java -cp "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
         EOF
-        # 赋予最高执行权限
         chmod 775 gradlew
-        # 验证文件格式（无CRLF）
         file gradlew
 
-    - name: Build Debug APK（绝对路径执行+极简参数，无任何解析歧义）
+    - name: Build Debug APK（绝对路径执行，彻底解决lasspath）
       run: |
-        # 用绝对路径执行，放弃所有working-directory/CD，彻底规避shell解析问题
         $MAIN_DIR/gradlew assembleDebug \
         --project-dir $MAIN_DIR \
         --no-daemon \
@@ -93,7 +84,6 @@ jobs:
         mkdir -p $MODULE_ROOT/common/files/{arm,x86,arm64-v8a,x86_64}
         mkdir -p $MODULE_ROOT/common/files/JamesDSP/{Convolver,DDC,liveprog,Presets}
         
-        # 绝对路径查找APK/SO库
         APK_PATH=$(find $MAIN_DIR/DSPManager/build/outputs/apk/debug -name "*.apk" | head -1)
         if [ -f "$APK_PATH" ]; then
           cp "$APK_PATH" $MODULE_ROOT/common/files/JamesDSPManager.apk
@@ -116,9 +106,14 @@ jobs:
         chmod 755 $MODULE_ROOT/{customize.sh,service.sh}
         chmod 755 $MODULE_ROOT/META-INF/com/google/android/update-binary
 
-    - name: Create Magisk Module ZIP
+    - name: Create Magisk Module ZIP（修复$符号语法错误，纯shell判断，无YAML嵌套）
       run: |
-        VERSION=${{ github.ref_name || 'dev-build-'$(date +%Y%m%d%H%M) }}
+        # 纯SHELL语法判断版本，彻底规避YAML表达式$符号错误
+        if [ -n "${{ github.ref_name }}" ] && [ "${{ github.ref_name }}" != "master" ] && [ "${{ github.ref_name }}" != "main" ]; then
+          VERSION="${{ github.ref_name }}"
+        else
+          VERSION="dev-build-$(date +%Y%m%d%H%M)"
+        fi
         ZIP_NAME="JamesDSPManager-RE-$VERSION.zip"
         cd $MODULE_ROOT
         zip -r9 $WORKSPACE/$ZIP_NAME * -x "*.git*" "*.DS_Store" "*/.git/*"
