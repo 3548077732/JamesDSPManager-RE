@@ -26,12 +26,11 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Setup JDK 17
+    - name: Setup JDK 17（修复cache: none错误，直接删除该参数）
       uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '17'
-        cache: none
 
     - name: Setup Android NDK r21e
       id: setup-ndk
@@ -47,7 +46,7 @@ jobs:
         unset GRADLE_OPTS GRADLE_USER_HOME CLASSPATH classpath LASS_PATH
         sudo apt-get clean
 
-    - name: 重新生成Linux原生Gradle Wrapper（无任何隐藏乱码）
+    - name: 重新生成Linux原生Gradle Wrapper（无任何隐藏乱码，根治lasspath）
       working-directory: ${{ env.MAIN_DIR }}
       run: |
         mkdir -p gradle/wrapper
@@ -106,9 +105,8 @@ jobs:
         chmod 755 $MODULE_ROOT/{customize.sh,service.sh}
         chmod 755 $MODULE_ROOT/META-INF/com/google/android/update-binary
 
-    - name: Create Magisk Module ZIP（修复$符号语法错误，纯shell判断，无YAML嵌套）
+    - name: Create Magisk Module ZIP（纯shell判断，无YAML$符号错误）
       run: |
-        # 纯SHELL语法判断版本，彻底规避YAML表达式$符号错误
         if [ -n "${{ github.ref_name }}" ] && [ "${{ github.ref_name }}" != "master" ] && [ "${{ github.ref_name }}" != "main" ]; then
           VERSION="${{ github.ref_name }}"
         else
